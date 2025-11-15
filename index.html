@@ -1,0 +1,591 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mapa de Audiencia Ecuador</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="https://unpkg.com/leaflet.heat@0.2.0/dist/leaflet-heat.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: Arial, sans-serif; }
+        
+        #controls {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            z-index: 1000;
+            background: white;
+            padding: 15px;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.2);
+            max-width: 320px;
+            max-height: 95vh;
+            overflow-y: auto;
+        }
+        
+        #map { height: 100vh; width: 100%; }
+        
+        button {
+            background: #2563eb;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 5px;
+            cursor: pointer;
+            margin: 5px 0;
+            width: 100%;
+        }
+        
+        button:hover { background: #1d4ed8; }
+        
+        .filter-group {
+            margin: 10px 0;
+            padding: 10px;
+            background: #f9fafb;
+            border-radius: 5px;
+        }
+        
+        .filter-group h4 {
+            margin-bottom: 8px;
+            color: #1f2937;
+            font-size: 14px;
+        }
+        
+        select {
+            width: 100%;
+            padding: 8px;
+            margin: 5px 0;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+        }
+        
+        #summary {
+            margin-top: 15px;
+            padding: 10px;
+            background: #dbeafe;
+            border-radius: 5px;
+            font-size: 14px;
+        }
+        
+        #summaryEstablecimientos {
+            margin-top: 10px;
+            padding: 10px;
+            background: #fef3c7;
+            border-radius: 5px;
+            font-size: 14px;
+        }
+        
+        .summary-item {
+            margin: 5px 0;
+            font-weight: bold;
+        }
+        
+        .radio-group {
+            margin: 10px 0;
+        }
+        
+        .radio-group label {
+            display: block;
+            margin: 5px 0;
+        }
+        
+        #loading {
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.3);
+            z-index: 2000;
+        }
+        
+        .section-title {
+            font-weight: bold;
+            color: #1f2937;
+            margin: 15px 0 10px 0;
+            padding-bottom: 5px;
+            border-bottom: 2px solid #e5e7eb;
+        }
+    </style>
+</head>
+<body>
+    <div id="loading">Cargando datos...</div>
+    
+    <div id="controls" style="display: none;">
+        <h3>Mapa de Audiencia</h3>
+        
+        <div class="section-title">🎯 Vallas Publicitarias</div>
+        
+        <div class="radio-group">
+            <label><input type="checkbox" id="showVallas" checked onchange="renderMap()"> Mostrar Vallas</label>
+            <label><input type="radio" name="mapType" value="circles" checked> Círculos Proporcionales</label>
+            <label><input type="radio" name="mapType" value="heatmap"> Mapa de Calor</label>
+            <label><input type="checkbox" id="forceDetail" onchange="renderMap()"> Mostrar todas las direcciones</label>
+        </div>
+        
+        <div class="filter-group">
+            <h4>Filtros Geográficos</h4>
+            <label>Provincia:</label>
+            <select id="provinciaFilter" onchange="updateFilters()">
+                <option value="">Todas</option>
+            </select>
+            
+            <label>Ciudad:</label>
+            <select id="ciudadFilter" onchange="updateFilters()">
+                <option value="">Todas</option>
+            </select>
+            
+            <label>Parroquia:</label>
+            <select id="parroquiaFilter" onchange="updateFilters()">
+                <option value="">Todas</option>
+            </select>
+        </div>
+        
+        <div id="summary"></div>
+        
+        <div class="section-title">🏪 Establecimientos</div>
+        
+        <div class="radio-group">
+            <label><input type="checkbox" id="showEstablecimientos" checked onchange="renderMap()"> Mostrar Establecimientos</label>
+        </div>
+        
+        <div class="filter-group">
+            <h4>Tipo de Establecimiento</h4>
+            <select id="tipoEstablecimiento" onchange="renderMap()">
+                <option value="">Todos</option>
+            </select>
+        </div>
+        
+        <div id="summaryEstablecimientos"></div>
+        
+        <button onclick="clearSelection()">Limpiar Todo</button>
+    </div>
+    
+    <div id="map"></div>
+
+    <script>
+        let map;
+        let allData = [];
+        let allEstablecimientos = [];
+        let currentVallasLayer = null;
+        let currentEstablecimientosLayer = null;
+        let selectedPoints = new Set();
+        
+        map = L.map('map').setView([-1.831239, -78.183406], 7);
+        
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            attribution: '© OpenStreetMap contributors'
+        }).addTo(map);
+        
+        window.onload = function() {
+            Promise.all([
+                loadExcelFile('datos.xlsx', 'vallas'),
+                loadExcelFile('establecimientos.xlsx', 'establecimientos')
+            ]).then(() => {
+                document.getElementById('loading').style.display = 'none';
+                document.getElementById('controls').style.display = 'block';
+            });
+        };
+
+        function loadExcelFile(filename, tipo) {
+            return fetch(filename)
+                .then(response => {
+                    if (!response.ok) throw new Error('No se pudo cargar ' + filename);
+                    return response.arrayBuffer();
+                })
+                .then(data => {
+                    const workbook = XLSX.read(data, {type: 'array'});
+                    
+                    let sheetName;
+                    if (tipo === 'vallas') {
+                        // Buscar "HOJA DE ENVÍO"
+                        sheetName = 'HOJA DE ENVÍO';
+                        if (!workbook.Sheets[sheetName]) {
+                            sheetName = Object.keys(workbook.Sheets).find(name => 
+                                name.toLowerCase().includes('hoja') && name.toLowerCase().includes('envio')
+                            ) || workbook.SheetNames[0];
+                        }
+                    } else {
+                        // Primera pestaña para establecimientos
+                        sheetName = workbook.SheetNames[0];
+                    }
+                    
+                    const sheet = workbook.Sheets[sheetName];
+                    const jsonData = XLSX.utils.sheet_to_json(sheet, {defval: ''});
+                    
+                    if (tipo === 'vallas') {
+                        processVallas(jsonData);
+                    } else {
+                        processEstablecimientos(jsonData);
+                    }
+                })
+                .catch(error => {
+                    console.warn('No se pudo cargar', filename, error);
+                    if (tipo === 'vallas') {
+                        processVallas([]);
+                    } else {
+                        processEstablecimientos([]);
+                    }
+                });
+        }
+        
+        function processVallas(data) {
+            allData = data.map(row => {
+                const lat = parseFloat(row['COORDENADAS 1']);
+                const lng = parseFloat(row['COORDENADAS 2']);
+                const alcance = parseFloat(row['ALCANCE MENSUAL UNICO (100%)']) || 0;
+                
+                return {
+                    proveedor: row.PROVEEDOR || '',
+                    provincia: row.PROVINCIA || '',
+                    ciudad: row.CIUDAD || '',
+                    parroquia: row.PARROQUIA || '',
+                    direccion: row['DIRECCIÓN'] || row.DIRECCION || '',
+                    lat: lat,
+                    lng: lng,
+                    alcance: alcance,
+                    alcance40: parseFloat(row['ALCANCE 40%']) || 0,
+                    circulacion: parseFloat(row['CIRCULACION TOTAL']) || 0
+                };
+            }).filter(row => !isNaN(row.lat) && !isNaN(row.lng));
+            
+            console.log('Vallas cargadas:', allData.length);
+            populateFilters();
+            renderMap();
+        }
+        
+        function processEstablecimientos(data) {
+            allEstablecimientos = data.map(row => {
+                const lat = parseFloat(row.latitud);
+                const lng = parseFloat(row.longitud);
+                
+                return {
+                    nombre: row.Establecimientos || 'Sin nombre',
+                    tipo: row.Establecimientos || 'Otros',
+                    lat: lat,
+                    lng: lng,
+                    ventas: parseFloat(row.total_ventas) || 0
+                };
+            }).filter(row => !isNaN(row.lat) && !isNaN(row.lng));
+            
+            console.log('Establecimientos cargados:', allEstablecimientos.length);
+            
+            // Poblar filtro de tipos
+            const tipos = [...new Set(allEstablecimientos.map(e => e.tipo))].sort();
+            const tipoSelect = document.getElementById('tipoEstablecimiento');
+            tipoSelect.innerHTML = '<option value="">Todos</option>';
+            tipos.forEach(t => {
+                tipoSelect.innerHTML += `<option value="${t}">${t}</option>`;
+            });
+            
+            renderMap();
+        }
+        
+        function populateFilters() {
+            const provincias = [...new Set(allData.map(d => d.provincia))].filter(p => p).sort();
+            const provinciaSelect = document.getElementById('provinciaFilter');
+            provinciaSelect.innerHTML = '<option value="">Todas</option>';
+            provincias.forEach(p => {
+                provinciaSelect.innerHTML += `<option value="${p}">${p}</option>`;
+            });
+        }
+        
+        function updateFilters() {
+            const provincia = document.getElementById('provinciaFilter').value;
+            const ciudadActual = document.getElementById('ciudadFilter').value;
+            const parroquiaActual = document.getElementById('parroquiaFilter').value;
+            
+            const filteredData = provincia ? allData.filter(d => d.provincia === provincia) : allData;
+            const ciudades = [...new Set(filteredData.map(d => d.ciudad))].filter(c => c).sort();
+            const ciudadSelect = document.getElementById('ciudadFilter');
+            
+            ciudadSelect.innerHTML = '<option value="">Todas</option>';
+            ciudades.forEach(c => {
+                const selected = c === ciudadActual ? 'selected' : '';
+                ciudadSelect.innerHTML += `<option value="${c}" ${selected}>${c}</option>`;
+            });
+            
+            const ciudad = ciudadSelect.value;
+            let filteredData2 = filteredData;
+            if (ciudad) {
+                filteredData2 = filteredData2.filter(d => d.ciudad === ciudad);
+            }
+            
+            const parroquias = [...new Set(filteredData2.map(d => d.parroquia))].filter(p => p).sort();
+            const parroquiaSelect = document.getElementById('parroquiaFilter');
+            
+            parroquiaSelect.innerHTML = '<option value="">Todas</option>';
+            parroquias.forEach(p => {
+                const selected = p === parroquiaActual ? 'selected' : '';
+                parroquiaSelect.innerHTML += `<option value="${p}" ${selected}>${p}</option>`;
+            });
+            
+            renderMap();
+        }
+        
+        function getFilteredData() {
+            const provincia = document.getElementById('provinciaFilter').value;
+            const ciudad = document.getElementById('ciudadFilter').value;
+            const parroquia = document.getElementById('parroquiaFilter').value;
+            
+            return allData.filter(d => {
+                return (!provincia || d.provincia === provincia) &&
+                       (!ciudad || d.ciudad === ciudad) &&
+                       (!parroquia || d.parroquia === parroquia);
+            });
+        }
+        
+        function getFilteredEstablecimientos() {
+            const tipo = document.getElementById('tipoEstablecimiento').value;
+            return tipo ? allEstablecimientos.filter(e => e.tipo === tipo) : allEstablecimientos;
+        }
+        
+        function groupByKey(data, key) {
+            const groups = {};
+            
+            data.forEach(item => {
+                const groupKey = item[key];
+                if (!groupKey) return;
+                
+                if (!groups[groupKey]) {
+                    groups[groupKey] = {
+                        label: groupKey,
+                        lat: 0,
+                        lng: 0,
+                        alcance: 0,
+                        alcance40: 0,
+                        circulacion: 0,
+                        count: 0,
+                        provincia: item.provincia,
+                        ciudad: item.ciudad,
+                        parroquia: item.parroquia
+                    };
+                }
+                
+                groups[groupKey].lat += item.lat;
+                groups[groupKey].lng += item.lng;
+                groups[groupKey].alcance += item.alcance;
+                groups[groupKey].alcance40 += item.alcance40;
+                groups[groupKey].circulacion += item.circulacion;
+                groups[groupKey].count++;
+            });
+            
+            return Object.values(groups).map(g => ({
+                ...g,
+                lat: g.lat / g.count,
+                lng: g.lng / g.count
+            }));
+        }
+        
+        function renderMap() {
+            // Limpiar capas anteriores
+            if (currentVallasLayer) map.removeLayer(currentVallasLayer);
+            if (currentEstablecimientosLayer) map.removeLayer(currentEstablecimientosLayer);
+            
+            const showVallas = document.getElementById('showVallas').checked;
+            const showEstablecimientos = document.getElementById('showEstablecimientos').checked;
+            
+            // Renderizar Vallas
+            if (showVallas) {
+                renderVallas();
+            }
+            
+            // Renderizar Establecimientos
+            if (showEstablecimientos) {
+                renderEstablecimientos();
+            }
+            
+            updateSummary();
+        }
+        
+        function renderVallas() {
+            const mapType = document.querySelector('input[name="mapType"]:checked').value;
+            const forceDetail = document.getElementById('forceDetail').checked;
+            const filteredData = getFilteredData();
+            
+            const provincia = document.getElementById('provinciaFilter').value;
+            const ciudad = document.getElementById('ciudadFilter').value;
+            const parroquia = document.getElementById('parroquiaFilter').value;
+            
+            let groupedData;
+            let groupLevel;
+            
+            if (forceDetail) {
+                groupedData = filteredData;
+                groupLevel = 'direccion';
+            } else if (parroquia) {
+                groupedData = filteredData;
+                groupLevel = 'direccion';
+            } else if (ciudad) {
+                groupedData = groupByKey(filteredData, 'parroquia');
+                groupLevel = 'parroquia';
+            } else if (provincia) {
+                groupedData = groupByKey(filteredData, 'ciudad');
+                groupLevel = 'ciudad';
+            } else {
+                groupedData = groupByKey(filteredData, 'provincia');
+                groupLevel = 'provincia';
+            }
+            
+            if (mapType === 'heatmap') {
+                const heatData = groupedData.map(d => [d.lat, d.lng, d.alcance / 10000]);
+                currentVallasLayer = L.heatLayer(heatData, {radius: 25, blur: 35}).addTo(map);
+            } else {
+                currentVallasLayer = L.layerGroup();
+                
+                const maxAlcance = Math.max(...groupedData.map(d => d.alcance));
+                
+                groupedData.forEach(d => {
+                    const radius = Math.sqrt(d.alcance / maxAlcance) * 30 + 5;
+                    
+                    const circle = L.circleMarker([d.lat, d.lng], {
+                        radius: radius,
+                        fillColor: '#3b82f6',
+                        color: '#fff',
+                        weight: 2,
+                        opacity: 1,
+                        fillOpacity: 0.6
+                    });
+                    
+                    circle.on('mouseover', function() {
+                        let tooltipContent = '';
+                        
+                        if (groupLevel === 'provincia') {
+                            tooltipContent = `<b>📍 ${d.label}</b><br>Puntos: ${d.count}<br>Alcance: ${d.alcance.toLocaleString()}`;
+                        } else if (groupLevel === 'ciudad') {
+                            tooltipContent = `<b>📍 ${d.label}</b><br>${d.provincia}<br>Puntos: ${d.count}<br>Alcance: ${d.alcance.toLocaleString()}`;
+                        } else if (groupLevel === 'parroquia') {
+                            tooltipContent = `<b>📍 ${d.label}</b><br>${d.ciudad}<br>Puntos: ${d.count}<br>Alcance: ${d.alcance.toLocaleString()}`;
+                        } else {
+                            tooltipContent = `<b>📍 ${d.direccion}</b><br>${d.parroquia}, ${d.ciudad}<br>Alcance: ${d.alcance.toLocaleString()}`;
+                        }
+                        
+                        circle.bindTooltip(tooltipContent, {
+                            permanent: false,
+                            direction: 'top',
+                            offset: [0, -10]
+                        }).openTooltip();
+                    });
+                    
+                    let popupContent = '';
+                    if (groupLevel === 'direccion') {
+                        popupContent = `
+                            <b>🎯 ${d.proveedor}</b><br>
+                            ${d.provincia} - ${d.ciudad}<br>
+                            ${d.parroquia}<br>
+                            <b>Dirección:</b> ${d.direccion}<br>
+                            <b>Alcance:</b> ${d.alcance.toLocaleString()}<br>
+                            <b>Alcance 40%:</b> ${d.alcance40.toLocaleString()}<br>
+                            <b>Circulación:</b> ${d.circulacion.toLocaleString()}
+                        `;
+                    } else {
+                        popupContent = `
+                            <b>🎯 ${d.label}</b><br>
+                            <b>Puntos agrupados:</b> ${d.count}<br>
+                            <b>Alcance Total:</b> ${d.alcance.toLocaleString()}<br>
+                            <b>Alcance 40%:</b> ${d.alcance40.toLocaleString()}<br>
+                            <b>Circulación:</b> ${d.circulacion.toLocaleString()}
+                        `;
+                    }
+                    
+                    circle.bindPopup(popupContent);
+                    circle.addTo(currentVallasLayer);
+                });
+                
+                currentVallasLayer.addTo(map);
+            }
+        }
+        
+        function renderEstablecimientos() {
+            const filteredEst = getFilteredEstablecimientos();
+            currentEstablecimientosLayer = L.layerGroup();
+            
+            filteredEst.forEach(e => {
+                const marker = L.circleMarker([e.lat, e.lng], {
+                    radius: 6,
+                    fillColor: '#f59e0b',
+                    color: '#fff',
+                    weight: 2,
+                    opacity: 1,
+                    fillOpacity: 0.8
+                });
+                
+                marker.on('mouseover', function() {
+                    marker.bindTooltip(`<b>🏪 ${e.nombre}</b><br>Ventas: ${e.ventas.toLocaleString()}`, {
+                        permanent: false,
+                        direction: 'top',
+                        offset: [0, -10]
+                    }).openTooltip();
+                });
+                
+                marker.bindPopup(`
+                    <b>🏪 ${e.nombre}</b><br>
+                    <b>Tipo:</b> ${e.tipo}<br>
+                    <b>Ventas:</b> ${e.ventas.toLocaleString()}
+                `);
+                
+                marker.addTo(currentEstablecimientosLayer);
+            });
+            
+            currentEstablecimientosLayer.addTo(map);
+        }
+        
+        function updateSummary() {
+            // Resumen Vallas
+            const filteredData = getFilteredData();
+            const totalAlcance = filteredData.reduce((sum, d) => sum + d.alcance, 0);
+            const totalPuntos = filteredData.length;
+            
+            document.getElementById('summary').innerHTML = `
+                <div class="summary-item">Puntos: ${totalPuntos}</div>
+                <div class="summary-item">Alcance Total: ${totalAlcance.toLocaleString()}</div>
+                <div class="summary-item">Promedio: ${totalPuntos ? Math.round(totalAlcance / totalPuntos).toLocaleString() : 0}</div>
+            `;
+            
+            // Resumen Establecimientos
+            const filteredEst = getFilteredEstablecimientos();
+            const totalVentas = filteredEst.reduce((sum, e) => sum + e.ventas, 0);
+            const tipoResumen = {};
+            
+            filteredEst.forEach(e => {
+                tipoResumen[e.tipo] = (tipoResumen[e.tipo] || 0) + 1;
+            });
+            
+            let resumenHTML = `
+                <div class="summary-item">Total: ${filteredEst.length} establecimientos</div>
+                <div class="summary-item">Ventas: ${totalVentas.toLocaleString()}</div>
+            `;
+            
+            const topTipos = Object.entries(tipoResumen)
+                .sort((a, b) => b[1] - a[1])
+                .slice(0, 3);
+            
+            if (topTipos.length > 0) {
+                resumenHTML += '<div style="font-size: 12px; margin-top: 5px; color: #6b7280;">Top tipos:</div>';
+                topTipos.forEach(([tipo, count]) => {
+                    resumenHTML += `<div style="font-size: 12px;">• ${tipo}: ${count}</div>`;
+                });
+            }
+            
+            document.getElementById('summaryEstablecimientos').innerHTML = resumenHTML;
+        }
+        
+        function clearSelection() {
+            document.getElementById('provinciaFilter').value = '';
+            document.getElementById('ciudadFilter').value = '';
+            document.getElementById('parroquiaFilter').value = '';
+            document.getElementById('tipoEstablecimiento').value = '';
+            updateFilters();
+        }
+        
+        document.querySelectorAll('input[name="mapType"]').forEach(radio => {
+            radio.addEventListener('change', renderMap);
+        });
+    </script>
+</body>
+</html>
